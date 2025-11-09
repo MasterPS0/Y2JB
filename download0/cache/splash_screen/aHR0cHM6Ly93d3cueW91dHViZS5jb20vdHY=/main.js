@@ -875,10 +875,22 @@ function trigger() {
         send_notification(version_string + "\nFW : " + FW_VERSION);
         await log("FW detected : " + FW_VERSION);
         
-        const major = FW_VERSION.split(".")[0];
-        SCE_KERNEL_DLSYM = libkernel_base + DLSYM_OFFSETS[major];
         await log("libkernel_base @ " + toHex(libkernel_base));
-        await log("SCE_KERNEL_DLSYM @ " + toHex(SCE_KERNEL_DLSYM));
+        try {
+            SCE_KERNEL_DLSYM = libkernel_base + get_dlsym_offset(FW_VERSION);
+            await log("SCE_KERNEL_DLSYM @ " + toHex(SCE_KERNEL_DLSYM));
+        } catch (e) {
+            await log("WARNING : No dlsym offset was found for firmware " + FW_VERSION);
+        }
+        
+        // Used for gpu rw
+        sceKernelAllocateMainDirectMemory = read64(eboot_base + 0x2A65EF8n);
+        // Same thing with sceKernelMapDirectMemory but with name assigning.
+        // Using this because don't want to use dlsym
+        sceKernelMapNamedDirectMemory = read64(eboot_base + 0x2A65F00n); 
+        
+        //sceAgcDriverSubmitDcb = read64(eboot_base + 0x2A66790n);
+        //sceAgcDcbDmaData = read64(eboot_base + 0x2A66868n);
         
         load_localscript('kernel.js');
         load_localscript('kernel_offset.js');

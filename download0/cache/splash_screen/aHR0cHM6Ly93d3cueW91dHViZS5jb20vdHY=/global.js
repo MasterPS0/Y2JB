@@ -32,9 +32,14 @@ let fake_frame;
 let return_value_buf;
 let saved_fp = 0n;
 
+let sceKernelAllocateMainDirectMemory;
+let sceKernelMapNamedDirectMemory; 
+//let sceAgcDriverSubmitDcb;
+//let sceAgcDcbDmaData;
+
 let FW_VERSION;
 
-let SCE_KERNEL_DLSYM;
+let SCE_KERNEL_DLSYM = 0n;
 
 const PAGE_SIZE = 0x4000;
 const PHYS_PAGE_SIZE = 0x1000;
@@ -102,13 +107,32 @@ let ROP = {
 };
 
 let DLSYM_OFFSETS = {
-    "4": 0x317d0n,
-    "5": 0x342e0n,
-    "6": 0x330a0n,
-    "7": 0x2ca80n,
-    "8": 0x2bc70n,
-    "9": 0x2d2f0n,
-    "10": 0x2cf40n
+    "4.03": 0x317D0n,
+    "4.50": 0x317D0n,
+    "4.51": 0x317D0n,
+    "5.00": 0x32160n,
+    "5.02": 0x32160n,
+    "5.10": 0x32160n,
+    "5.50": 0x32230n,
+    "6.00": 0x330A0n,
+    "6.02": 0x330A0n,
+    "6.50": 0x33110n,
+    "7.00": 0x33E90n,
+    "7.01": 0x33E90n,
+    "7.20": 0x33ED0n,
+    "7.40": 0x33ED0n,
+    "7.60": 0x33ED0n,
+    "7.61": 0x33ED0n,
+    "8.00": 0x342E0n,
+    "8.20": 0x342E0n,
+    "8.40": 0x342E0n,
+    "8.60": 0x342E0n,
+    "9.00": 0x350E0n,
+    "9.20": 0x350E0n,
+    "9.40": 0x350E0n,
+    "9.60": 0x350E0n,
+    "10.00": 0x349C0n,
+    "10.01": 0x349C0n
 };
 
 let SYSCALL = {
@@ -166,4 +190,5 @@ let SYSCALL = {
     thr_new: 0x1c7n,
     thr_exit: 0x1afn,
     fsync: 0x5fn,
+    ioctl: 0x36n
 };

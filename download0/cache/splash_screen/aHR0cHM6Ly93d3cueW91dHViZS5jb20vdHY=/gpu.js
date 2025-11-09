@@ -3,11 +3,6 @@
 
 // GPU page table
 
-let sceKernelAllocateMainDirectMemory;
-let sceKernelMapDirectMemory;
-let sceGnmSubmitCommandBuffers;
-let sceGnmSubmitDone;
-
 const GPU_PDE_SHIFT = {
     VALID: 0,
     IS_PTE: 54,
@@ -100,17 +95,81 @@ function gpu_walk_pt(vmid, virt_addr) {
 let gpu = {};
 
 gpu.dmem_size = 2n * 0x100000n; // 2MB
+gpu.fd = null; // GPU device file descriptor
+
+// Direct ioctl helper functions
+
+gpu.build_command_descriptor = function(gpu_addr, size_in_bytes) {
+    // Each descriptor is 16 bytes (2 qwords)
+    
+    const desc = malloc(16);
+    const size_in_dwords = BigInt(size_in_bytes) >> 2n;
+    
+    // First qword: (gpu_addr_low32 << 32) | 0xC0023F00
+    const qword0 = ((gpu_addr & 0xFFFFFFFFn) << 32n) | 0xC0023F00n;
+    
+    // Second qword: (size_in_dwords << 32) | (gpu_addr_high16)
+    const qword1 = ((size_in_dwords & 0xFFFFFn) << 32n) | ((gpu_addr >> 32n) & 0xFFFFn);
+    
+    write64(desc, qword0);
+    write64(desc + 8n, qword1);
+    
+    return desc;
+};
+
+gpu.ioctl_submit_commands = function(pipe_id, cmd_count, cmd_descriptors_ptr) {
+    // ioctl 0xC0108102
+    // Structure: [dword pipe_id][dword count][qword cmd_buf_ptr]
+    
+    const submit_struct = malloc(0x10);
+    write32(submit_struct + 0x0n, BigInt(pipe_id));
+    write32(submit_struct + 0x4n, BigInt(cmd_count));
+    write64(submit_struct + 0x8n, cmd_descriptors_ptr);
+    
+    const ret = syscall(SYSCALL.ioctl, gpu.fd, 0xC0108102n, submit_struct);
+    if (ret !== 0n) {
+        throw new Error("ioctl submit failed: " + toHex(ret));
+    }
+};
+
+// may be not needed...
+gpu.ioctl_gpu_sync = function() {
+    // ioctl 0xC0048117
+    // Structure: [dword value] (set to 0)
+    
+    const sync_struct = malloc(0x4);
+    write32(sync_struct, 0n);
+    
+    const ret = syscall(SYSCALL.ioctl, gpu.fd, 0xC0048117n, sync_struct);
+
+};
+
+gpu.ioctl_wait_done = function() {
+    // ioctl 0xC0048116
+    // Structure: [dword value] (set to 0)
+    
+    const wait_struct = malloc(0x4);
+    write32(wait_struct, 0n);
+    
+    const ret = syscall(SYSCALL.ioctl, gpu.fd, 0xC0048116n, wait_struct);
+    
+    // We just ignore error lol
+    //if (ret !== 0n) {
+    //    throw new Error("ioctl wait_done failed: " + toHex(ret));
+    //}
+    
+    // Manual sleep - temp fix
+    nanosleep(1000000000);
+};
 
 gpu.setup = function() {
     check_kernel_rw();
     
-    const libSceGnmDriver = load_prx("/system/common/lib/libSceGnmDriver.sprx");
-    
-    // Put these into global to make life easier
-    sceKernelAllocateMainDirectMemory = dlsym(LIBKERNEL_HANDLE, "sceKernelAllocateMainDirectMemory");
-    sceKernelMapDirectMemory = dlsym(LIBKERNEL_HANDLE, "sceKernelMapDirectMemory");
-    sceGnmSubmitCommandBuffers = dlsym(libSceGnmDriver, "sceGnmSubmitCommandBuffers");
-    sceGnmSubmitDone = dlsym(libSceGnmDriver, "sceGnmSubmitDone");
+    // Open GPU device directly
+    gpu.fd = syscall(SYSCALL.open, alloc_string("/dev/gc"), O_RDWR);
+    if (gpu.fd === 0xffffffffffffffffn) {
+        throw new Error("Failed to open /dev/gc");
+    }
     
     const prot_ro = PROT_READ | PROT_WRITE | GPU_READ;
     const prot_rw = prot_ro | GPU_WRITE;
@@ -197,29 +256,24 @@ gpu.pm4_dma_data = function(dest_va, src_va, length) {
 };
 
 gpu.submit_dma_data_command = function(dest_va, src_va, size) {
-    const dcb_count = 1;
-    const dcb_gpu_addr = malloc(dcb_count * 8);
-    const dcb_sizes_in_bytes = malloc(dcb_count * 4);
-    
     // Prep command buf
     const dma_data = gpu.pm4_dma_data(dest_va, src_va, size);
-    write_buffer(gpu.cmd_va, dma_data); // prep dma cmd
+    write_buffer(gpu.cmd_va, dma_data);
     
-    // Prep param
-    write64(dcb_gpu_addr, gpu.cmd_va);
-    write32(dcb_sizes_in_bytes, BigInt(dma_data.length));
+    // Build command descriptor manually
+    const desc = gpu.build_command_descriptor(gpu.cmd_va, dma_data.length);
     
-    // Submit to GPU
-    const ret = call(sceGnmSubmitCommandBuffers, BigInt(dcb_count), dcb_gpu_addr, dcb_sizes_in_bytes, 0n, 0n);
-    if (ret !== 0n) {
-        throw new Error("sceGnmSubmitCommandBuffers() error: " + toHex(ret));
-    }
+    const pipe_id = 0;
     
-    // Inform GPU that current submission is done
-    const ret2 = call(sceGnmSubmitDone);
-    if (ret2 !== 0n) {
-        throw new Error("sceGnmSubmitDone() error: " + toHex(ret2));
-    }
+    gpu.ioctl_gpu_sync();
+    
+    // Submit to gpu via direct ioctl
+    gpu.ioctl_submit_commands(pipe_id, 1, desc);
+    
+    gpu.ioctl_gpu_sync();
+    
+    // Wait for completion
+    gpu.ioctl_wait_done();
 };
 
 gpu.transfer_physical_buffer = function(phys_addr, size, is_write) {
@@ -310,12 +364,6 @@ gpu.read_qword = function(kaddr) {
     return result;
 };
 
-gpu.hex_dump = function(kaddr, size) {
-    size = size || 0x40;
-    // Assuming hex_dump function exists elsewhere
-    return hex_dump(gpu.read_buffer(kaddr, size), kaddr);
-};
-
 gpu.write_byte = function(dest, value) {
     const buf = new Uint8Array(1);
     buf[0] = Number(value & 0xFFn);
@@ -353,7 +401,7 @@ function alloc_main_dmem(size, prot, flag) {
     }
     
     const out = malloc(8);
-    const mem_type = 1n; // 1-10
+    const mem_type = 1n;
     
     const size_big = typeof size === "bigint" ? size : BigInt(size);
     const prot_big = typeof prot === "bigint" ? prot : BigInt(prot);
@@ -365,16 +413,17 @@ function alloc_main_dmem(size, prot, flag) {
     }
     
     const phys_addr = read64(out);
-    
     write64(out, 0n);
     
-    const ret2 = call(sceKernelMapDirectMemory, out, size_big, prot_big, flag_big, phys_addr, size_big);
+    // Dummy name
+    const name_buf = alloc_string("mem");
+    
+    const ret2 = call(sceKernelMapNamedDirectMemory, out, size_big, prot_big, flag_big, phys_addr, size_big, name_buf);
     if (ret2 !== 0n) {
-        throw new Error("sceKernelMapDirectMemory() error: " + toHex(ret2));
+        throw new Error("sceKernelMapNamedDirectMemory() error: " + toHex(ret2));
     }
     
-    const virt_addr = read64(out);
-    return virt_addr;
+    return read64(out);
 }
 
 function get_curproc_vmid() {
